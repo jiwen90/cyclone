@@ -1,0 +1,127 @@
+
+
+```{r load packages and scripts}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyverse)
+library(ggpubr)
+
+dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(dir)
+getwd()
+
+source('clone_trajectory_util.R')
+```
+
+```{r load object}
+n1 <- readRDS("cd8_nn_labeled.RDS")
+m <- data.frame(n1@meta.data)
+m$timepoint <- gsub("Baseline", "0", m$timepoint)
+m$timepoint <- gsub("Follow Up 1", "3", m$timepoint)
+m$timepoint <- gsub("Follow Up 2", "6", m$timepoint)
+m$timepoint <- gsub("Follow Up 3", "9", m$timepoint)
+m$timepoint <- gsub("Follow Up 4", "12", m$timepoint)
+m$timepoint <- gsub("Follow Up 5", "15", m$timepoint)
+m$timepoint <- gsub("Follow Up 6", "18", m$timepoint)
+n1@meta.data <- m
+n1 <- subset(n1, patient_alias != "14-1189_aCTLA-4") # unusual patient
+s.genes <- Seurat::cc.genes$s.genes
+g2m.genes <- Seurat::cc.genes$g2m.genes
+n1 <- CellCycleScoring(n1, s.features = s.genes, g2m.features = g2m.genes)
+n <- n1
+```
+
+```{r clean up object}
+timepoints <- c(0, 3, 6, 9)
+# timepoints <- c(0, 3, 6, 9, 12)
+n <- subset(n, timepoint %in% timepoints)
+n@meta.data$timepoint <- factor(n@meta.data$timepoint, levels=timepoints)
+
+a <- n@meta.data$TRA_chain_cdr3_nt
+b <- n@meta.data$TRB_chain_cdr3_nt
+
+a[is.na(a)] <- 0
+b[is.na(b)] <- 0
+
+temp3 <- function(x) {
+  if (grepl("0", x, fixed=TRUE)) {return (NA)}
+  return (x)
+}
+
+# only TRB
+tcr <- unlist(lapply(b, temp3))
+n <- AddMetaData(n, tcr, col.name="TCR_name")
+n <- subset(n, subset = TCR_name != "NA")
+tcr <- paste0(n@meta.data$TCR_name, n@meta.data$patient_alias)
+n <- AddMetaData(n, tcr, col.name="TCR_name")
+n <- subset(n, metaclusters_exh != "IFN")
+
+c <- data.frame(table(n@meta.data$patient_alias, n@meta.data$timepoint))
+# remove patients with less than 400 cells at any timepoint
+c <- c[c$Freq < 400 & c$Var2 %in% timepoints,]
+n <- subset(n, subset = patient_alias %in% c$Var1, invert=T)
+
+# set celltype column
+n@meta.data$celltype <- n@meta.data$metaclusters_exh
+```
+
+```{r single run for testing}
+nclust <- 6
+ncols <- ifelse(nclust > 4, 3, 2)
+# seurat object metadata needs columns: timepoint, treatment, patient_alias, celltype, TRB_chain_cdr3_nt
+n <- cyclone_find_trajectories(n, n_clust=nclust, min_fc=2, min_c=0.25, clustering_method="hclust", delta=T, custom_order=c(1, 4, 5, 6, 2, 3)) #hclust
+hm <- plot_trajectories_cor(n)
+save_heatmap_png(hm, 'trajectories_cor.png')
+plot_trajectories_area(n, ncols=3) + theme(legend.position="none")
+ggsave('trajectories_area.png', width=6, height=6, dpi=500)
+ggsave('trajectories_area.pdf', width=6, height=6)
+plot_trajectories_area(n, col_by="patient_alias", ncols=ncols)
+ggsave('trajectories_area_patient.png', dpi=500)
+plot_trajectories_area(n, col_by="patient_alias", split_treatment=T, normalize=F)
+ggsave('trajectories_area_patient_treatment.png', height=6, width=10, dpi=500)
+ggsave('trajectories_area_patient_treatment.pdf', height=6, width=10)
+plot_trajectories_area(n, col_by="k", split_treatment=T, normalize=F) + theme(legend.position="none")
+ggsave('trajectories_area_treatment_split.png', height=6, width=10, dpi=500)
+ggsave('trajectories_area_treatment_split.pdf', height=6, width=10)
+plot_trajectories_area(n, col_by="treatment", split_treatment=T, ncols=ncols) + theme(legend.position="none")
+ggsave('trajectories_area_split_treatment.png', dpi=500)
+plot_trajectories_area(n, group_by="patient_alias", ncols=ncols)
+ggsave('trajectories_area_patientgroup.png', dpi=500)
+plot_trajectories_area(n, col_by="treatment", ncols=ncols, ymax=250)
+ggsave('trajectories_area_treatment.png', dpi=500)
+
+
+plot_trajectories_ctype(n)
+ggsave('trajectories_ctype.png')
+plot_trajectories_ctype_treatment(n)
+ggsave('trajectories_ctype_treatment.png', width=15, dpi=500)
+plot_trajectories_ctype_treatment(n, delta="fc")
+ggsave('trajectories_ctype_treatment_fc.png', width=12, height=8, dpi=500)
+ggsave('trajectories_ctype_treatment_fc.pdf', width=12, height=8, dpi=500)
+plot_trajectories_ctype_treatment(n, delta="abs")
+ggsave('trajectories_ctype_treatment_abs.png', width=15, dpi=500)
+ggsave('trajectories_ctype_treatment_abs.pdf', width=15)
+pd1_traj <- c("Traj 2", "Traj 3")
+ipi_traj <- c("Traj 1")
+combo_traj <- c("Traj 5", "Traj 6")
+plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=pd1_traj, treatments=c("aPD1"), ctypes=c("NK-like", "Effector", "Exhausted"))
+ggsave('trajectories_ctype_treatment_patient_abs_aPD1.png', width=6, height=6, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_abs_aPD1.pdf', width=6, height=6)
+plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=combo_traj, treatments=c("Combination"), ctypes=c("Effector", "Exhausted"))
+ggsave('trajectories_ctype_treatment_patient_abs_combo.png', width=7.5, height=6, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_abs_combo.pdf', width=7.5, height=6)
+plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=ipi_traj, treatments=c("aCTLA-4"), ctypes=c("Activated"))
+ggsave('trajectories_ctype_treatment_patient_abs_aCTLA-4.png', width=5, height=4, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_abs_aCTLA-4.pdf', width=5, height=4)
+plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=pd1_traj, treatments=c("aPD1"), ctypes=c("NK-like", "Effector", "Exhausted"))
+ggsave('trajectories_ctype_treatment_patient_fc_aPD1.png', width=6, height=6, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_fc_aPD1.pdf', width=6, height=6)
+plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=combo_traj, treatments=c("Combination"), ctypes=c("Effector", "Exhausted"))
+ggsave('trajectories_ctype_treatment_patient_fc_combo.png', width=7.5, height=6, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_fc_combo.pdf', width=7.5, height=6)
+plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=ipi_traj, treatments=c("aCTLA-4"), ctypes=c("Activated"))
+ggsave('trajectories_ctype_treatment_patient_fc_aCTLA-4.png', width=5, height=4, dpi=500)
+ggsave('trajectories_ctype_treatment_patient_fc_aCTLA-4.pdf', width=5, height=4)
+```
