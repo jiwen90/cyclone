@@ -1,16 +1,20 @@
 
-save_heatmap_png <- function(x, filename) {
+save_pheatmap_png <- function(x, filename) {
    stopifnot(!missing(x))
    stopifnot(!missing(filename))
    png(filename, width=2300, height=2000, units="px", res=500)
+  #  grid::grid.newpage()
+  #  grid::grid.draw(x$gtable)
    ComplexHeatmap::draw(x)
    dev.off()
 }
 
-save_heatmap_pdf <- function(x, filename) {
+save_pheatmap_pdf <- function(x, filename) {
    stopifnot(!missing(x))
    stopifnot(!missing(filename))
    pdf(filename, width=7, height=6)
+   #grid::grid.newpage()
+   #grid::grid.draw(x$gtable)
    ComplexHeatmap::draw(x)
    dev.off()
 }
@@ -29,13 +33,21 @@ auto_colset <- function(n=2, colz="paired"){
   }
   return(ret)
 }
+lol <- c("#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F",
+  "#FF7F00", "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928")
+colz_plotting <- c("#438EC0", "#63A8A0", "#98D277", "#7D54A5", "#A6CEE3", "#B9A499", "#3BA432", "#C3AAD2", "#f16689")
+metaclusters_plotting <- c("Activated", "SCM", "Early Activated", "IFN", "CM", "Early Effector", "NK-like", "Effector", "Exhausted")
+names(colz_plotting) <- metaclusters_plotting
 
 cycling_cutoff <- 0.12
-fc_filter_plotting <- 0.02
+fc_filter_plotting <- 0.5
 
 fix_pd1 <- function(x) {
   # replace aPD1 with aPD-1 in vector
-  x <- gsub("aPD1", "aPD-1", x)
+  x <- gsub("^aPD1$", "(prior ipi)\naPD-1", x)
+  x <- gsub("aPD-1 (naive)", "\naPD-1", x, fixed=T)
+  x <- gsub("aCTLA-4", "\naCTLA-4", x)
+  x <- gsub("Combination", "\nCombination", x)
   return(x)
 }
 
@@ -48,17 +60,16 @@ temp3 <- function(x)
   return (x)
 }
 
-compute_trb_clones_nt <- function(m)
+compute_tra_trb_clones_nt <- function(m)
 {
-  m$TRB_chain_cdr3_nt[is.na(m$TRB_chain_cdr3_nt)] <- 0
-  m <- m %>% mutate(TRB_nt_dataset_clonotype_id = lapply(TRB_chain_cdr3_nt, temp3))
+  m <- m %>% mutate(TRA_TRB_nt_dataset_clonotype_id = paste0(TRA_chain_cdr3_nt, TRB_chain_cdr3_nt))
   return(m)
 }
 
-compute_trb_clones_aa <- function(m)
+compute_tra_trb_clones_aa <- function(m)
 {
   m$TRB_chain_cdr3[is.na(m$TRB_chain_cdr3)] <- 0
-  m <- m %>% mutate(TRB_aa_dataset_clonotype_id = lapply(TRB_chain_cdr3, temp3))
+  m <- m %>% mutate(TRA_TRB_aa_dataset_clonotype_id = lapply(TRB_chain_cdr3, temp3))
   return(m)
 }
 
@@ -69,18 +80,18 @@ cyclone_prepare_trajectories <- function(seurat, ambiguity = 'combine', calculat
   message("Computing clonotypes")
   
   if (calculate_nt_clones){
-    message("Clonotypes are calculated using TRB nt sequences")
+    message("Clonotypes are calculated using TRA and TRB nt sequences")
     clonotypes <-
-      compute_trb_clones_nt(mdata) %>%
-      filter(!is.na(TRB_nt_dataset_clonotype_id)) %>%
-      mutate(clone_id = paste0(patient_alias, TRB_nt_dataset_clonotype_id))
+      compute_tra_trb_clones_nt(mdata) %>%
+      filter(!is.na(TRA_TRB_nt_dataset_clonotype_id)) %>%
+      mutate(clone_id = paste0(patient_alias, TRA_TRB_nt_dataset_clonotype_id))
   }
   else {
-    message("Clonotypes are calculated using TRB aa sequences")
+    message("Clonotypes are calculated using TRA and TRB aa sequences")
     clonotypes <-
-      compute_trb_clones_aa(mdata) %>%
-      filter(!is.na(TRB_aa_dataset_clonotype_id)) %>%
-      mutate(clone_id = paste0(patient_alias, TRB_aa_dataset_clonotype_id))
+      compute_tra_trb_clones_aa(mdata) %>%
+      filter(!is.na(TRA_TRB_aa_dataset_clonotype_id)) %>%
+      mutate(clone_id = paste0(patient_alias, TRA_TRB_aa_dataset_clonotype_id))
   }
   message(nrow(clonotypes) - length(unique(clonotypes$barcode)), " cells with ambigiuous clonotypes identified")
   
@@ -102,7 +113,7 @@ cyclone_prepare_trajectories <- function(seurat, ambiguity = 'combine', calculat
   } else {
     # throws all (other option could be to randomly remove duplicated entry)
     ambi_barcodes <- clonotypes %>% mutate(duplicated = duplicated(barcode)) %>% filter(duplicated) %>% pull(barcode)
-    clonotypes <- clonotypes %>% filter(!barcode %in% ambi_barcodes) %>% mutate(clone_id = TRB_nt_dataset_clonotype_id)
+    clonotypes <- clonotypes %>% filter(!barcode %in% ambi_barcodes) %>% mutate(clone_id = TRA_TRB_nt_dataset_clonotype_id)
   }
   
   seurat@meta.data <- left_join(mdata, select(clonotypes, barcode, clone_id), by = 'barcode') %>% tibble::column_to_rownames('barcode')
@@ -124,11 +135,12 @@ cyclone_find_trajectories <- function(seurat,
                                       downsample = FALSE,
                                       min_t_cells = 1, #1e3,
                                       drop_missing_timepoints = TRUE,
-                                      classify_vdj = FALSE,
                                       delta = FALSE,
                                       reg = 0.00,
                                       min_fc = 2,
                                       min_c = 0.25,
+                                      filter_col = NULL,
+                                      adaptive = NULL,
                                       custom_order = NULL){
   stopifnot(!is.null(n_clust))
   
@@ -154,7 +166,7 @@ cyclone_find_trajectories <- function(seurat,
   }
   
   # Compute relative abundance statistics per clone
-  clonestats <- .compute_clonestats(mdata_f, classify_vdj)
+  clonestats <- .compute_clonestats(mdata_f)
   
   clonestats_f <-
     clonestats %>%
@@ -162,6 +174,7 @@ cyclone_find_trajectories <- function(seurat,
     group_by(clone_id) %>%
     mutate(delta_fc = (perc + reg) / (lag(perc, order_by = timepoint, n = 1) + reg)) %>%
     mutate(delta_c = perc - lag(perc, order_by = timepoint, n = 1)) %>%
+    mutate(avg_freq = (perc + lag(perc, order_by = timepoint, n = 1)) / 2) %>%
     ungroup %>%
     mutate(delta_fc = ifelse(is.na(delta_fc), 1, delta_fc)) %>% # baseline should be 1
     mutate(delta_c = ifelse(is.na(delta_c), 0, delta_c)) # baseline should be 0
@@ -187,18 +200,44 @@ cyclone_find_trajectories <- function(seurat,
   clonestats_f %>%
     write_csv(paste0("fold change vs abs change_", ntimepoints, "_", clustering_method, ".csv"))
 
-  clonestats_f <- clonestats_f %>%
-    group_by(clone_id) %>%
-    filter(any((delta_fc > min_fc & delta_c > min_c & timepoint_max != 0) | # increasing case
-                  (delta_fc < 1 / min_fc & delta_c < -min_c & timepoint_max == 0))) %>% # decreasing case
-    ungroup
-  
-  clonestats_f %>%
-    write_csv(paste0("fold change vs abs change_", ntimepoints, "_", clustering_method, "_filtered.csv"))
+  epitope_symbol <- "max_epitope"
+
+  epitope_flag <- epitope_symbol %in% colnames(clonestats_f)
+
+  if (is.null(filter_col)) {
+    clonestats_f <- clonestats_f %>%
+      group_by(clone_id) %>%
+      filter(any((delta_fc > min_fc & delta_c > min_c & timepoint_max != 0) | # increasing case
+                    (delta_fc < 1 / min_fc & delta_c < -min_c & timepoint_max == 0))) %>% # decreasing case
+      ungroup
+  } else {
+    # if filter_col not in columns, return error
+    if (!(filter_col %in% colnames(mdata))) {
+      stop(paste(filter_col, "is not in metadata"))
+    }
+    clones_filter <- mdata %>% filter(!!sym(filter_col)) %>% pull(clone_id) %>% unique()
+    if (epitope_flag) {
+      clonestats_f <- clonestats_f %>%
+      filter(clone_id %in% clones_filter | !is.na(!!sym(epitope_symbol)))
+    } else {
+      clonestats_f <- clonestats_f %>%
+        filter(clone_id %in% clones_filter)
+    }
+  }
+
+  if (!is.null(adaptive)) {
+    clonestats_f <- clonestats_f %>% semi_join(adaptive, by = c("patient_alias", "TRB_chain_cdr3"))
+  }
   
   # Create a matrix of clone-level relative abundance by time point
-  mat <- clonestats_f %>%
-    filter(n_max >= min_cells) %>%
+  if (epitope_flag) {
+    mat <- clonestats_f %>%
+      filter(n_max >= min_cells | !is.na(!!sym(epitope_symbol)))
+  } else {
+    mat <- clonestats_f %>%
+      filter(n_max >= min_cells)
+  }
+  mat <- mat %>%
     select(clone_id, timepoint, perc) %>%
     tidyr::spread(timepoint, perc) %>%
     column_to_rownames('clone_id') %>%
@@ -224,7 +263,6 @@ cyclone_find_trajectories <- function(seurat,
   }
   
   # Compute correlation matrix between clone relative abundances
-  #mat_cor <- suppressWarnings(cor(mat, method = correlation_method, use = "pairwise.complete.obs"))
   mat_cor <- cor(mat, method = correlation_method, use = "pairwise.complete.obs")
 
   # Compute clone clusters based on the correlation matrix
@@ -239,13 +277,13 @@ cyclone_find_trajectories <- function(seurat,
   
   if (clustering_method == 'hclust')
   {
-    #d    <- tgstat::tgs_dist(t(mat_cor))\
+    #d    <- tgstat::tgs_dist(t(mat_cor))
     d    <- dist(mat_cor, method = 'euclidean')
     hc   <- hclust(d, method = 'ward.D2')
     ct   <- cutree(hc, k = n_clust)
     if (!is.null(custom_order) & length(custom_order) == n_clust & all(custom_order %in% unique(ct))) {
       # replace cluster numbers with custom order
-      ct <- factor(ct, levels = unique(ct), labels = custom_order)
+      ct <- factor(ct, levels = custom_order, labels = sort(custom_order))
     }
     df_k <- tibble(clone_id = names(ct), k = paste0('Traj ', ct))
   }
@@ -253,14 +291,17 @@ cyclone_find_trajectories <- function(seurat,
   if (clustering_method == 'pam')
   {
     res  <- cluster::pam(mat_cor, k = n_clust)
-    df_k <- tibble(clone_id = names(res$clustering), k = paste0('Traj ', res$clustering))
+    ct <- res$clustering
+    if (!is.null(custom_order) & length(custom_order) == n_clust & all(custom_order %in% unique(ct))) {
+      # replace cluster numbers with custom order
+      ct <- factor(ct, levels = custom_order, labels = sort(custom_order))
+    }
+    df_k <- tibble(clone_id = names(ct), k = paste0('Traj ', ct))
   }
 
   if (clustering_method == 'absolute')
   {
     mat <- data.frame(t(mat))
-    # move first column (Baseline) to last column
-    mat <- mat[, c(2:ncol(mat), 1)]
     # assign cluster by timepoint with max frequency
     df_k <- mat %>%
       mutate(k = paste0('Traj ', apply(., 1, which.max))) %>%
@@ -286,7 +327,7 @@ cyclone_find_trajectories <- function(seurat,
 ### Function 3 - .compute_clonestats
 # A helper function for "cyclone_find_trajectories", calculates clone relative abundance and size statistics on a clone-timepoint level
 
-.compute_clonestats <- function(seurat, classify_vdj)
+.compute_clonestats <- function(seurat)
 {
   if(any(class(seurat) %in% 'Seurat'))
   {
@@ -337,16 +378,6 @@ cyclone_find_trajectories <- function(seurat,
   # Add trajectory column in case it existed in the Seurat object
   if(any(colnames(clonotypes) %in% "k")) {
     clonestats <- left_join(clonestats, distinct(select(clonotypes, clone_id, k)))
-  }
-
-  # specificity
-  if (classify_vdj) {
-    vdj <- read.csv("vdjdb_trb.tsv", sep="\t", header=T)
-    vdj <- vdj %>% select(CDR3, Epitope.gene, Epitope.species) %>% 
-                  group_by(CDR3) %>% 
-                  filter(row_number() == 1) %>% # prevent duplicates
-                  ungroup()
-    clonestats <- merge(clonestats, vdj, by.x="TRB_chain_cdr3", by.y="CDR3", all.x=T)
   }
 
   if(any(class(seurat) %in% 'Seurat')) {
@@ -400,11 +431,20 @@ plot_trajectories_area <- function(seurat,
                                    group_by = 'clone_id',
                                    col_by = 'k',
                                    ncols = 4,
+                                   line_width = 0.05,
                                    summary_function = sum,
                                    ymax = NULL,
                                    split_treatment = FALSE,
+                                   split_response = FALSE,
                                    normalize = FALSE,
-                                   exclude = FALSE) {
+                                   exclude = FALSE,
+                                   selected = NULL,
+                                   tcrb = NULL,
+                                   filter = NULL,
+                                   patient = NULL,
+                                   adaptive = NULL,
+                                   remove_na = FALSE,
+                                   clone_id = NULL) {
   ggdata <- seurat@misc$clonestats %>% 
     filter(k != 'Other') %>%
     group_by(k) %>%
@@ -438,7 +478,7 @@ plot_trajectories_area <- function(seurat,
       ungroup
   }
 
-  # get number of unique patients per treatment
+  # get number of unique patietns per treatment
   if (normalize) {
     ggdata <- ggdata %>%
         group_by(treatment) %>%
@@ -448,6 +488,41 @@ plot_trajectories_area <- function(seurat,
   }
   
   ggdata <- ggdata %>% filter(!is.na(perc))
+
+  if (!is.null(selected)) {
+    ggdata <- ggdata %>% filter(k %in% selected)
+  }
+  if (remove_na) {
+    ggdata <- ggdata %>% filter(!is.na(!!sym(col_by)))
+  }
+  if (!is.null(filter)) {
+    ggdata <- ggdata %>% filter(!!sym(col_by) %in% filter)
+    ggdata$k <- factor(ggdata$k, levels = c('Traj 1', 'Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'))
+  }
+  if (!is.null(adaptive)) {
+    # filter by adaptive with column patient_alias and TRB_chain_cdr3
+    # must match row combination
+    ggdata <- ggdata %>%
+      semi_join(adaptive, by = c("patient_alias", "TRB_chain_cdr3"))
+  }
+  if (!is.null(tcrb)) {
+    ggdata$k <- factor(ggdata$k, levels = c('Traj 1', 'Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'))
+    ggdata <- ggdata %>% filter(!is.na(!!sym(col_by)))
+    ggdata <- ggdata %>% filter(patient_alias == patient)
+    ggdata <- ggdata %>% filter(TRB_chain_cdr3 %in% tcrb)
+
+  }
+  if (split_response) {
+    # replace CR and PR with R in response column
+    ggdata$response <- gsub("CR", "R", ggdata$response)
+    ggdata$response <- gsub("PR", "R", ggdata$response)
+    # replace SD and PD with NR in response column
+    ggdata$response <- gsub("SD", "NR", ggdata$response)
+    ggdata$response <- gsub("PD", "NR", ggdata$response)
+    # remove NA
+    ggdata <- ggdata %>% filter(!is.na(response))
+  }
+
   if(group_by == 'patient_alias') {
     p <- ggplot(ggdata, aes(timepoint, perc,
                             group = !!sym(group_by),
@@ -459,29 +534,61 @@ plot_trajectories_area <- function(seurat,
       facet_wrap(vars(!!sym(facet_by)), scales = 'free', ncol = ncols) +
       {if(is.numeric(ymax)) coord_cartesian(ylim = (c(0, ymax)))}
   } else {
+    if (!is.null(tcrb)) {
+      ggdata <- ggdata %>% 
+        group_by(k) %>%
+        mutate(csum = cumsum(perc)) %>%
+        ungroup()
+    }
     colz <- auto_colset(length(unique(ggdata[[col_by]])), colz=ifelse(col_by == "k", "selected", "paired"))
+    if (col_by == "patient_alias") {
+      # sort by treatment then get patient order
+      patient_order <- ggdata %>%
+        distinct(patient_alias, treatment) %>%
+        arrange(treatment) %>%
+        pull(patient_alias)
+
+      ggdata$patient_alias <- factor(ggdata$patient_alias, levels = patient_order)
+    }
     p <- ggplot(ggdata, aes(timepoint, perc,
                             group = !!sym(group_by),
                             fill = factor(!!sym(col_by)))) +
-      geom_area(color = 'black', lwd = 0.05) +
+      geom_area(color = 'black', lwd = line_width) +
       theme_bw() + 
+      theme(axis.text = element_text(size = 14, color="black"),
+            axis.title = element_text(size = 18, color="black"),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            strip.text = element_text(size = 18, color="black"),
+            strip.background = element_blank()) +
       labs(fill=col_by) +
       scale_fill_manual(values=colz) +
       {if (split_treatment) {
-        facet_grid(vars(treatment), vars(!!sym(facet_by)), scales = 'free', labeller=labeller(treatment = fix_pd1))#, space = 'free') #if want box to be proportional
+        facet_grid(vars(treatment), vars(!!sym(facet_by)), scales = 'fixed', drop=F, labeller=labeller(treatment = fix_pd1))#, space = 'free') #if want box to be proportional
+      } else if (split_response) {
+        facet_grid(vars(response), vars(!!sym(facet_by)), scales = 'free', drop=F, labeller=labeller(treatment = fix_pd1))#, space = 'free') #if want box to be proportional
       } else {
         facet_wrap(vars(!!sym(facet_by)), scales = 'fixed', ncol = ncols)
       }} +
       {if(is.numeric(ymax)) coord_cartesian(ylim = (c(0, ymax)))}
+    if (!is.null(tcrb)) {
+      ggdata <- ggdata %>% filter(timepoint == "3")
+      p <- p + geom_text(data = ggdata, aes(x = 3, y = csum, label=TRB_chain_cdr3), size=3)
+    
+    }
   }
   if(col_by == 'clone_id'){
     p <- p + theme(legend.position = 'none')
+  }
+  if(col_by == "patient_alias") {
+    p <- p + scale_fill_manual("Patient", values=colz)
   }
   
   p <- p + labs(x = 'Weeks', y = 'Clone Abundance (%)')
   return(p)
 }
 
+### NOT USED
 ### Plotting function 3 - Plot clone trajectories by cluster and cell type across time points
 plot_trajectories_ctype <- function(seurat,
                                     normalization = 'none',
@@ -489,10 +596,10 @@ plot_trajectories_ctype <- function(seurat,
                                     trajectories = NULL,
                                     ctype_exclude = NULL,
                                     top_n = Inf,
-                                    regularization = 5,
+                                    regularization = 2,
                                     ncols = 2,
                                     facet_by = "k",
-                                    group_by = 'celltype',
+                                    group_by = 'metaclusters_exh',
                                     norm_cell_n = FALSE,
                                     show_labels = TRUE,
                                     label_top_n = 3,
@@ -513,91 +620,100 @@ plot_trajectories_ctype <- function(seurat,
     message('Normalizing to ', n_cells, ' number of cells per time point')
   }
 
-  # exclude trajectory that goes down (if used absolute clustering)
   if (exclude) {
     last_traj <- ggdata %>% filter(k != "Other") %>% pull(k) %>% unique %>% sort %>% tail(1)
     ggdata <- ggdata %>% filter(k != last_traj)
   }
 
-  ggdata2 <- ggdata %>% filter(k != 'Other', !is.na(timepoint)) %>%
-    group_by(timepoint, k, celltype, Phase) %>%
-    summarise(phase_counts=n()) %>%
-    ungroup() %>%
-    group_by(timepoint, k, celltype) %>%
-    summarise(cycling = sum(phase_counts[Phase == 'G2M']) / sum(phase_counts) * 100) %>%
+  ggdata2 <- ggdata
+  ggdata2$mki67 <- seurat@assays$RNA@counts['MKI67', rownames(ggdata2)]
+  
+  # cycling is out of all patients to deal with sparsity
+  ggdata2 <- ggdata2 %>% filter(k != 'Other', !is.na(timepoint)) %>%
+    group_by(timepoint, k, metaclusters_exh) %>%
+    summarise(num=n(), cycling_count=sum(mki67 > 0), cycling = cycling_count / num * 100) %>%
     ungroup()
+
+  # cap at 10
+  ggdata2$cycling[ggdata2$cycling > 10] <- 10
 
   ggdata <- ggdata %>% filter(!is.na(timepoint)) %>%
     group_by(timepoint, patient_alias) %>%
     mutate(count=n()) %>%
     ungroup() %>%
     filter(k != 'Other') %>%
-    group_by(timepoint, k, clone_id, celltype) %>%
+    group_by(timepoint, k, clone_id, metaclusters_exh, patient_alias) %>%
     summarise(freq = n() / count) %>%
     ungroup() %>%
     distinct() %>%
-    tidyr::complete(timepoint, k, celltype, fill = list(freq = 0)) %>%
-    group_by(timepoint, k, celltype) %>%
-    summarise(n = sum(freq) * 100)
-
-  ggdata <- ggdata %>% left_join(ggdata2, by = c('timepoint', 'k', 'celltype'))
+    tidyr::complete(patient_alias, timepoint, k, metaclusters_exh, fill = list(freq = 0)) %>%
+    group_by(timepoint, k, metaclusters_exh, patient_alias) %>%
+    summarise(n = sum(freq) * 100) %>%
+    ungroup()
+  
+  # cycling
+  ggdata <- ggdata %>% left_join(ggdata2, by = c('timepoint', 'k', 'metaclusters_exh'))
 
   y_label_suffix <- '%'
   
   # Format y axis values either as delta (default) or FC
   if(delta == 'fc') {
     ggdata <- ggdata %>%
-      group_by(k, celltype) %>%
+      group_by(k, metaclusters_exh, patient_alias) %>%
       mutate(delta = log2((n + regularization) / (n[timepoint == levels(timepoint)[1]] + regularization))) %>%
       ungroup
     
     y_label <- 'log2FC'
-  }
-  
-  if(delta == 'delta') {
+  } else if(delta == 'delta') {
     ggdata <- ggdata %>%
-      group_by(k, celltype) %>%
+      group_by(k, metaclusters_exh, patient_alias) %>%
       mutate(delta = n - n[timepoint == levels(timepoint)[1]]) %>%
       ungroup
     
     y_label <- paste0('Delta (', y_label_suffix, ')')
+  } else {
+    ggdata <- ggdata %>% mutate(delta = n)
+    y_label <- 'Absolute (%)'
   }
+
+  ggdata <- ggdata %>% 
+    group_by(timepoint, k, metaclusters_exh, cycling) %>%
+    summarise(delta = mean(delta)) # average patient
 
   # Optional - remove specific cell types
   if(!is.null(ctype_exclude)) {
-    ggdata <- ggdata %>% filter(!celltype %in% ctype_exclude)
+    ggdata <- ggdata %>% filter(!metaclusters_exh %in% ctype_exclude)
   }
   
   ggdata <- ggdata %>% 
-    mutate(celltype = forcats::fct_lump_n(celltype,
+    mutate(metaclusters_exh = forcats::fct_lump_n(metaclusters_exh,
                                            n = top_n,
                                            w = abs(delta),
                                            other_level = 'other')) %>%
-    filter(celltype != 'other')
+    filter(metaclusters_exh != 'other')
   # Optional - remove specific trajectories
   if(!is.null(trajectories)) {
     ggdata <- ggdata %>% filter(k %in% trajectories)
   }
   # Plotting
-  p <- ggdata %>%
+  p <- ggdata %>% 
     ggplot(aes(timepoint, delta, group = !!sym(group_by), col = !!sym(group_by))) +
     geom_point() +
-    geom_point(aes(size = cycling), alpha=0.3) +
     geom_line() +
-    scale_size_binned_area(n.breaks = 8) +
     facet_wrap(vars(!!sym(facet_by)), scales = 'free', ncol = ncols) +
     theme_bw() + 
-    labs(x = "Weeks", y = y_label)
+    labs(x = "Weeks", y = y_label) +
+    scale_color_manual("Metacluster", values = colz_plotting)
   
   if(show_labels) {
-    ggdata_text_repel <- ggdata %>%
-      group_by(celltype, k) %>%
+    ggdata_text_repel <- ggdata %>% 
+      group_by(metaclusters_exh, k) %>%
       mutate(keep = abs(delta) == max(abs(delta))) %>%
       filter(keep) %>% 
-      group_by(celltype, k) %>%
+      group_by(metaclusters_exh, k) %>%
       sample_n(1)
-
-    # choose labels that exceed threshold
+    
+    # choose greater than 1 delta for each k
     ggdata_text_repel <- ggdata_text_repel %>% 
       group_by(k) %>%
       filter(delta > fc_filter_plotting) %>%
@@ -612,17 +728,17 @@ plot_trajectories_ctype <- function(seurat,
   return(p)
 }
 
-### Plotting function 3 - Plot clone trajectories by cluster and cell type across time points
+### Plotting function 4 - Plot clone trajectories by cluster and cell type across time points, split by treatment
 plot_trajectories_ctype_treatment <- function(seurat,
                                     normalization = 'none',
                                     delta = 'delta',
                                     trajectories = NULL,
                                     ctype_exclude = NULL,
                                     top_n = Inf,
-                                    regularization = 5,
+                                    regularization = 2,
                                     ncols = 2,
                                     facet_by = "k",
-                                    group_by = 'celltype',
+                                    group_by = 'metaclusters_exh',
                                     norm_cell_n = FALSE,
                                     show_labels = TRUE,
                                     exclude = FALSE,
@@ -650,47 +766,53 @@ plot_trajectories_ctype_treatment <- function(seurat,
     ggdata <- ggdata %>% filter(k != last_traj)
   }
 
-  ggdata2 <- ggdata %>% filter(k != 'Other', !is.na(timepoint)) %>%
-    group_by(timepoint, treatment, k, celltype, Phase, patient_alias) %>%
-    summarise(phase_counts=n()) %>%
-    ungroup() %>%
-    group_by(timepoint, treatment, k, celltype, patient_alias) %>%
-    summarise(cycling = sum(phase_counts[Phase == 'G2M']) / sum(phase_counts)) %>%
-    ungroup() %>%
-    group_by(timepoint, treatment, k, celltype) %>%
-    summarise(cycling = mean(cycling)) # average patient
+  ggdata2 <- ggdata
+  ggdata2$mki67 <- seurat@assays$RNA@counts['MKI67', rownames(ggdata2)]
+  
+  # cycling is out of all patients to deal with sparsity
+  ggdata2 <- ggdata2 %>% filter(k != 'Other', !is.na(timepoint)) %>%
+    group_by(timepoint, treatment, k, metaclusters_exh) %>%
+    summarise(num=n(), cycling_count=sum(mki67 > 0), cycling = cycling_count / num * 100) %>%
+    ungroup()
+
+  # cap at 10
+  ggdata2$cycling[ggdata2$cycling > 10] <- 10
 
   ggdata <- ggdata %>% filter(!is.na(timepoint)) %>%
     group_by(timepoint, treatment, patient_alias) %>%
     mutate(count=n()) %>%
     ungroup() %>%
     filter(k != 'Other') %>%
-    group_by(timepoint, treatment, k, clone_id, celltype, patient_alias) %>%
+    group_by(timepoint, treatment, k, clone_id, metaclusters_exh, patient_alias) %>%
     summarise(freq = n() / count) %>%
     ungroup() %>%
     distinct() %>%
-    tidyr::complete(timepoint, treatment, k, celltype, patient_alias, fill = list(freq = 0)) %>%
-    group_by(timepoint, treatment, k, celltype, patient_alias) %>%
+    # complete but only patients for their unique treatments, do not put every patient in every treatment
+    tidyr::complete(nesting(treatment, patient_alias), timepoint, k, metaclusters_exh, fill = list(freq = 0)) %>%
+    group_by(timepoint, treatment, k, metaclusters_exh, patient_alias) %>%
     summarise(n = sum(freq) * 100) %>%
-    ungroup() %>%
-    group_by(timepoint, treatment, k, celltype) %>%
-    summarise(n = mean(n)) # average patient
+    ungroup()
+  
+  if (!is.null(selected)) {
+    ggdata <- ggdata %>% filter(k %in% selected)
+  }
 
-  ggdata <- ggdata %>% left_join(ggdata2, by = c('timepoint', 'treatment', 'k', 'celltype'))
-
+  # cycling
+  ggdata <- ggdata %>% left_join(ggdata2, by = c('timepoint', 'treatment', 'k', 'metaclusters_exh'))
+  
   y_label_suffix <- '%'
   
   # Format y axis values either as delta (default) or FC
   if(delta == 'fc') {
     ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
+      group_by(k, treatment, metaclusters_exh, patient_alias) %>%
       mutate(delta = log2((n + regularization) / (n[timepoint == levels(timepoint)[1]] + regularization))) %>%
       ungroup
     
     y_label <- 'log2FC'
   } else if(delta == 'delta') {
     ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
+      group_by(k, treatment, metaclusters_exh, patient_alias) %>%
       mutate(delta = n - n[timepoint == levels(timepoint)[1]]) %>%
       ungroup
     
@@ -700,19 +822,21 @@ plot_trajectories_ctype_treatment <- function(seurat,
     y_label <- "Absolute %"
   }
 
-
+  ggdata <- ggdata %>% 
+    group_by(timepoint, treatment, k, metaclusters_exh, cycling) %>%
+    summarise(delta = mean(delta)) # average patient
 
   # Optional - remove specific cell types
   if(!is.null(ctype_exclude)) {
-    ggdata <- ggdata %>% filter(!celltype %in% ctype_exclude)
+    ggdata <- ggdata %>% filter(!metaclusters_exh %in% ctype_exclude)
   }
   
   ggdata <- ggdata %>% 
-    mutate(celltype = forcats::fct_lump_n(celltype,
+    mutate(metaclusters_exh = forcats::fct_lump_n(metaclusters_exh,
                                            n = top_n,
                                            w = abs(delta),
                                            other_level = 'other')) %>%
-    filter(celltype != 'other')
+    filter(metaclusters_exh != 'other')
   # Optional - specific trajectories
   if(!is.null(trajectories)) {
     ggdata <- ggdata %>% filter(k %in% trajectories)
@@ -723,51 +847,62 @@ plot_trajectories_ctype_treatment <- function(seurat,
     geom_point(size=1.5) +
     geom_point(aes(size = cycling), alpha=0.3) +
     geom_line(size=0.5) +
-    facet_grid(vars(treatment), vars(!!sym(facet_by)), scales = 'free', space = 'fixed', labeller=labeller(treatment = fix_pd1)) +
+    facet_grid(vars(treatment), vars(!!sym(facet_by)), scales = 'free', space = 'free', labeller=labeller(treatment = fix_pd1)) +
     theme_bw() + 
     labs(x = "Weeks", y = y_label) +
-    scale_radius(range=c(0.5, 8), breaks=c(0, 0.25, 0.50, 0.75, 1.00), labels=c(0, 25, 50, 75, 100)) +
-    guides(size=guide_legend(title="% cycling"))
+    scale_color_manual("Metacluster", values = colz_plotting) +
+    theme(axis.text = element_text(size=14, color="black"),
+          axis.title = element_text(size=18, color="black"),
+          legend.text=element_text(size=12),
+          legend.title=element_text(size=14),
+          strip.clip="off",
+          strip.text = element_text(size = 18, color="black"),
+          strip.background = element_blank()) +
+    scale_radius(range=c(0.5, 8), breaks=c(0, 2, 4, 6, 8, 10)) +
+    guides(size=guide_legend(title="% Ki67+"))
   
   if(show_labels) {
     ggdata_text_repel <- ggdata %>%
-      group_by(celltype, k) %>%
+      group_by(metaclusters_exh, treatment, k) %>%
       mutate(keep = abs(delta) == max(abs(delta))) %>%
       filter(keep) %>% 
-      group_by(celltype, k) %>%
+      group_by(metaclusters_exh, treatment, k) %>%
       sample_n(1)
-    # choose labels that exceed threshold
+    
+    # choose greater than delta for each k
     ggdata_text_repel <- ggdata_text_repel %>% 
-      group_by(k) %>%
-      filter(delta > fc_filter_plotting) %>%
-      ungroup()
+      filter(delta > ifelse(!!delta == "fc", fc_filter_plotting, 0.5))
     
     p <- p + ggrepel::geom_text_repel(data = ggdata_text_repel,
                                       aes(label = !!sym(group_by)),
-                                      nudge_x = 0.35,
+                                      nudge_x = 1,
                                       size = 4,
+                                      force=5,
+                                      max.overlaps=Inf,
                                       show.legend=F)
   }
   
   return(p)
 }
 
-### Plotting function 3 - Plot clone trajectories by cluster and cell type across time points
+### Plotting function 5 - Plot clone trajectories by cluster and cell type across time points, split by treatment and showing each individual patient
 plot_trajectories_ctype_treatment_patient <- function(seurat,
                                     normalization = 'none',
                                     delta = 'delta',
                                     trajectories = NULL,
                                     ctypes = NULL,
                                     top_n = Inf,
-                                    regularization = 5,
+                                    regularization = 2,
                                     ncols = 2,
                                     facet_by = "k",
-                                    group_by = 'celltype',
+                                    group_by = 'metaclusters_exh',
+                                    col_by = "metaclusters_exh",
                                     norm_cell_n = FALSE,
                                     show_labels = TRUE,
                                     exclude = FALSE,
                                     selected = NULL,
                                     treatments = NULL,
+                                    exclude_patient = F,
                                     label_top_n = 3,
                                     filter_magnitude = FALSE)
 {
@@ -791,12 +926,23 @@ plot_trajectories_ctype_treatment_patient <- function(seurat,
     ggdata <- ggdata %>% filter(k != last_traj)
   }
 
+  ggdata2 <- ggdata
+  ggdata2$mki67 <- seurat@assays$RNA@counts['MKI67', rownames(ggdata2)]
+  
+  ggdata2 <- ggdata2 %>% filter(k != 'Other', !is.na(timepoint)) %>%
+    group_by(timepoint, treatment, k, metaclusters_exh, patient_alias) %>%
+    summarise(num=n(), cycling_count=sum(mki67 > 0), cycling = cycling_count / num * 100) %>%
+    ungroup()
+
+  # cap at 10
+  ggdata2$cycling[ggdata2$cycling > 10] <- 10
+
   ggdata <- ggdata %>% filter(!is.na(timepoint)) %>%
     group_by(timepoint, treatment, patient_alias) %>%
     mutate(count=n()) %>%
     ungroup() %>%
     filter(k != 'Other') %>%
-    group_by(timepoint, treatment, k, clone_id, celltype, patient_alias) %>%
+    group_by(timepoint, treatment, k, clone_id, metaclusters_exh, patient_alias) %>%
     summarise(freq = n() / count) %>%
     ungroup() %>%
     distinct()
@@ -809,24 +955,30 @@ plot_trajectories_ctype_treatment_patient <- function(seurat,
     ggdata <- ggdata %>% filter(treatment %in% treatments)
   }
 
+  if (exclude_patient) {
+    ggdata <- ggdata %>% filter(!(patient_alias == "14-1128" & k == "Traj 2" & metaclusters_exh == "Exhausted"))
+  }
+
   ggdata <- ggdata %>%
-    tidyr::complete(timepoint, treatment, k, celltype, patient_alias, fill = list(freq = 0)) %>%
-    group_by(timepoint, treatment, k, celltype, patient_alias) %>%
+    tidyr::complete(nesting(treatment, patient_alias), timepoint, k, metaclusters_exh, fill = list(freq = 0)) %>%
+    group_by(timepoint, treatment, k, metaclusters_exh, patient_alias) %>%
     summarise(n = sum(freq) * 100)
+
+  ggdata <- ggdata %>% left_join(ggdata2, by = c('timepoint', 'treatment', 'k', 'metaclusters_exh', 'patient_alias'))
 
   y_label_suffix <- '%'
   
   # Format y axis values either as delta (default) or FC
   if(delta == 'fc') {
     ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
+      group_by(k, treatment, metaclusters_exh) %>%
       mutate(delta = log2((n + regularization) / (n[timepoint == levels(timepoint)[1]] + regularization))) %>%
       ungroup
     
     y_label <- 'log2FC'
   } else if(delta == 'delta') {
     ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
+      group_by(k, treatment, metaclusters_exh) %>%
       mutate(delta = n - n[timepoint == levels(timepoint)[1]]) %>%
       ungroup
     
@@ -838,280 +990,40 @@ plot_trajectories_ctype_treatment_patient <- function(seurat,
 
   # Optional - specific cell types
   if(!is.null(ctypes)) {
-    ggdata <- ggdata %>% filter(celltype %in% ctypes)
+    ggdata <- ggdata %>% filter(metaclusters_exh %in% ctypes)
   }
   
   ggdata <- ggdata %>% 
-    mutate(celltype = forcats::fct_lump_n(celltype,
+    mutate(metaclusters_exh = forcats::fct_lump_n(metaclusters_exh,
                                            n = top_n,
                                            w = abs(delta),
                                            other_level = 'other')) %>%
-    filter(celltype != 'other')
+    filter(metaclusters_exh != 'other')
 
-  # Plotting
+  title <- "Metacluster"
+  if (col_by == "metaclusters_exh") {
+    colz <- colz_plotting[ctypes]
+  } else {
+    colz <- auto_colset(length(unique(ggdata[[col_by]])), colz= "selected")
+    title <- ifelse(col_by == "patient_alias", "Patient", col_by)
+  }
+
   p <- ggdata %>% 
-    ggplot(aes(timepoint, delta, group = patient_alias, col = celltype)) +
+    ggplot(aes(timepoint, delta, group = patient_alias, color = !!sym(col_by))) +
     geom_point(size=1.5) +
     geom_line(size=0.5) +
-    facet_grid(vars(celltype), vars(k), scales = 'fixed', space = 'free', labeller=labeller(treatment = fix_pd1)) +
+    facet_grid(vars(metaclusters_exh), vars(k), scales = 'free', space = 'free') +
     theme_bw() + 
-    labs(x = "Weeks", y = y_label)
+    labs(x = "Weeks", y = y_label) +
+    scale_color_manual(title, values = colz) +
+    scale_radius(range=c(0.5, 8), breaks=c(0, 2, 4, 6, 8, 10)) +
+    guides(size=guide_legend(title="% Ki67+")) +
+    theme(axis.text = element_text(size=14, color="black"),
+          axis.title = element_text(size=18, color="black"),
+          legend.text=element_text(size=12),
+          legend.title=element_text(size=14),
+          strip.text = element_text(size = 15, color="black"),
+          strip.background = element_blank())
   
   return(p)
 }
-
-### Plotting function 3 - Plot clone trajectories by cluster and cell type across time points
-plot_trajectories_ctype_comp <- function(seurat,
-                                    normalization = 'none',
-                                    delta = 'delta',
-                                    trajectories = NULL,
-                                    ctype_exclude = NULL,
-                                    top_n = Inf,
-                                    regularization = 5,
-                                    ncols = 2,
-                                    facet_by = "k",
-                                    group_by = 'celltype',
-                                    norm_cell_n = FALSE,
-                                    show_labels = TRUE,
-                                    label_top_n = 3,
-                                    exclude = FALSE)
-{
-  ggdata <- seurat@meta.data %>% filter(!is.na(clone_id))
-  
-  # Set timepoint column as a factor
-  if(class(ggdata$timepoint) != 'factor') {
-    ggdata$timepoint <- as.factor(ggdata$timepoint)
-  }
-  
-  # Normalize time-points to same # t-cells
-  if(norm_cell_n) {
-    set.seed(19)
-    n_cells <- ggdata %>% count(timepoint) %>% pull(n) %>% min
-    ggdata  <- ggdata %>% group_by(timepoint) %>% sample_n(n_cells, replace = FALSE)
-    message('Normalizing to ', n_cells, ' number of cells per time point')
-  }
-
-  # ggdata <- ggdata %>% filter(k != 'Other', !is.na(timepoint))  %>%
-  #   count(timepoint, k, celltype) %>%
-  #   ungroup() %>%
-  #   tidyr::complete(timepoint, k, celltype, fill = list(n = 0))
-  # if exclude trajectory that goes down
-  if (exclude) {
-    last_traj <- ggdata %>% filter(k != "Other") %>% pull(k) %>% unique %>% sort %>% tail(1)
-    ggdata <- ggdata %>% filter(k != last_traj)
-  }
-  ggdata <- ggdata %>% filter(k != 'Other', !is.na(timepoint)) %>%
-    group_by(timepoint, k, celltype) %>%
-    summarise(n=n(), cycling_count=sum(cycling1 > cycling_cutoff), cycling = cycling_count / n) %>%
-    ungroup() %>%
-    tidyr::complete(timepoint, k, celltype, fill = list(n = 0))
-
-  ggdata$cycling <- scales::rescale(ggdata$cycling, to=c(1, 8), from=range(0, 0.1))
-  
-  # Format abundance values either as absolute counts (default) or relative abundance
-  if(normalization != 'absolute')
-  {
-    ggdata <- ggdata %>% 
-      group_by(timepoint, k) %>%
-      mutate(n = n / sum(n) * 100) %>%
-      ungroup %>% 
-      filter(!is.na(n)) # if no cells at timepoint + trajectory will return NaN
-    
-    y_label_suffix <- '%'
-  } else {
-    y_label_suffix <- '# cells'
-  }
-  
-  # Format y axis values either as delta (default) or FC
-  if(delta == 'fc') {
-    ggdata <- ggdata %>%
-      group_by(k, celltype) %>%
-      mutate(delta = log2((n + regularization) / (n[timepoint == levels(timepoint)[1]] + regularization))) %>%
-      ungroup
-    
-    y_label <- 'log2FC'
-  }
-  
-  if(delta == 'delta') {
-    ggdata <- ggdata %>%
-      group_by(k, celltype) %>%
-      mutate(delta = n - n[timepoint == levels(timepoint)[1]]) %>%
-      ungroup
-    
-    y_label <- paste0('Delta (', y_label_suffix, ')')
-  }
-
-  # Optional - remove specific cell types
-  if(!is.null(ctype_exclude)) {
-    ggdata <- ggdata %>% filter(!celltype %in% ctype_exclude)
-  }
-  
-  ggdata <- ggdata %>% 
-    mutate(celltype = forcats::fct_lump_n(celltype,
-                                           n = top_n,
-                                           w = abs(delta),
-                                           other_level = 'other')) %>%
-    filter(celltype != 'other')
-  # Optional - remove specific trajectories
-  if(!is.null(trajectories)) {
-    ggdata <- ggdata %>% filter(k %in% trajectories)
-  }
-  # Plotting
-  p <- ggdata %>% mutate(timepoint = factor(as.integer(timepoint))) %>%
-    ggplot(aes(timepoint, delta, group = !!sym(group_by), col = !!sym(group_by))) +
-    geom_point() +
-    #geom_point(aes(size = cycling), alpha=0.3) +
-    geom_line() +
-    scale_size_binned_area(n.breaks = 8) +
-    facet_wrap(vars(!!sym(facet_by)), scales = 'free', ncol = ncols) +
-    theme_bw() + 
-    labs(y = y_label)
-  
-  if(show_labels) {
-    ggdata_text_repel <- ggdata %>% mutate(timepoint = factor(as.integer(timepoint))) %>%
-      group_by(celltype, k) %>%
-      mutate(keep = abs(delta) == max(abs(delta))) %>%
-      filter(keep) %>% 
-      group_by(celltype, k) %>%
-      sample_n(1)
-
-    ggdata_text_repel <- ggdata_text_repel %>% 
-      group_by(k) %>%
-      filter(abs(delta) > fc_filter_plotting) %>%
-      ungroup()
-    
-    p <- p + ggrepel::geom_text_repel(data = ggdata_text_repel,
-                                      aes(label = !!sym(group_by)),
-                                      nudge_x = 0.35,
-                                      size = 4)
-  }
-  
-  return(p)
-}
-
-### Plotting function 3 - Plot clone trajectories by cluster and cell type across time points
-plot_trajectories_ctype_treatment_comp <- function(seurat,
-                                    normalization = 'none',
-                                    delta = 'delta',
-                                    trajectories = NULL,
-                                    ctype_exclude = NULL,
-                                    top_n = Inf,
-                                    regularization = 5,
-                                    ncols = 2,
-                                    facet_by = "k",
-                                    group_by = 'celltype',
-                                    norm_cell_n = FALSE,
-                                    show_labels = TRUE,
-                                    label_top_n = 3,
-                                    exclude = FALSE)
-{
-  ggdata <- seurat@meta.data %>% filter(!is.na(clone_id))
-  
-  # Set timepoint column as a factor
-  if(class(ggdata$timepoint) != 'factor') {
-    ggdata$timepoint <- as.factor(ggdata$timepoint)
-  }
-  
-  # Normalize time-points to same # t-cells
-  if(norm_cell_n) {
-    set.seed(19)
-    n_cells <- ggdata %>% count(timepoint, treatment) %>% pull(n) %>% min
-    ggdata  <- ggdata %>% group_by(timepoint, treatment) %>% sample_n(n_cells, replace = FALSE)
-    message('Normalizing to ', n_cells, ' number of cells per time point')
-  }
-
-  if (exclude) {
-    last_traj <- ggdata %>% filter(k != "Other") %>% pull(k) %>% unique %>% sort %>% tail(1)
-    ggdata <- ggdata %>% filter(k != last_traj)
-  }
-
-  ggdata <- ggdata %>% filter(k != 'Other', !is.na(timepoint)) %>%
-    group_by(timepoint, treatment, k, celltype) %>%
-    summarise(n=n(), cycling_count=sum(cycling1 > cycling_cutoff), cycling = cycling_count / n) %>%
-    ungroup() %>%
-    tidyr::complete(timepoint, treatment, k, celltype, fill = list(n = 0))
-
-  ggdata$cycling <- scales::rescale(ggdata$cycling, to=c(1, 8), from=range(0, 0.1))
-  
-  # Format abundance values either as absolute counts (default) or relative abundance
-  if(normalization != 'absolute')
-  {
-    ggdata <- ggdata %>% 
-      group_by(timepoint, treatment, k) %>%
-      mutate(n = n / sum(n) * 100) %>%
-      ungroup %>% 
-      filter(!is.na(n)) # if no cells at timepoint + trajectory will return NaN
-    
-    y_label_suffix <- '%'
-  } else {
-    y_label_suffix <- '# cells'
-  }
-  
-  # Format y axis values either as delta (default) or FC
-  if(delta == 'fc') {
-    ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
-      mutate(delta = log2((n + regularization) / (n[timepoint == levels(timepoint)[1]] + regularization))) %>%
-      ungroup
-    
-    y_label <- 'log2FC'
-  }
-  
-  if(delta == 'delta') {
-    ggdata <- ggdata %>%
-      group_by(k, treatment, celltype) %>%
-      mutate(delta = n - n[timepoint == levels(timepoint)[1]]) %>%
-      ungroup
-    
-    y_label <- paste0('Delta (', y_label_suffix, ')')
-  }
-
-  # Optional - remove specific cell types
-  if(!is.null(ctype_exclude)) {
-    ggdata <- ggdata %>% filter(!celltype %in% ctype_exclude)
-  }
-  
-  ggdata <- ggdata %>% 
-    mutate(celltype = forcats::fct_lump_n(celltype,
-                                           n = top_n,
-                                           w = abs(delta),
-                                           other_level = 'other')) %>%
-    filter(celltype != 'other')
-  # Optional - remove specific trajectories
-  if(!is.null(trajectories)) {
-    ggdata <- ggdata %>% filter(k %in% trajectories)
-  }
-  # Plotting
-  p <- ggdata %>% mutate(timepoint = factor(as.integer(timepoint))) %>%
-    ggplot(aes(timepoint, delta, group = !!sym(group_by), col = !!sym(group_by))) +
-    geom_point() +
-    #geom_point(aes(size = cycling), alpha=0.3) +
-    geom_line() +
-    scale_size_binned_area(n.breaks = 8) +
-    #facet_wrap(vars(!!sym(facet_by)), scales = 'free', ncol = ncols) +
-    facet_grid(vars(treatment), vars(!!sym(facet_by)), scales = 'free', space = 'free', labeller=labeller(treatment = fix_pd1)) +
-    theme_bw() + 
-    labs(y = y_label)
-  
-  if(show_labels) {
-    ggdata_text_repel <- ggdata %>% mutate(timepoint = factor(as.integer(timepoint))) %>%
-      group_by(celltype, treatment, k) %>%
-      mutate(keep = abs(delta) == max(abs(delta))) %>%
-      filter(keep) %>% 
-      group_by(celltype, treatment, k) %>%
-      sample_n(1)
-    
-    ggdata_text_repel <- ggdata_text_repel %>% 
-      group_by(k) %>%
-      filter(abs(delta) > fc_filter_plotting) %>%
-      ungroup()
-    
-    p <- p + ggrepel::geom_text_repel(data = ggdata_text_repel,
-                                      aes(label = !!sym(group_by)),
-                                      nudge_x = 0.35,
-                                      size = 4)
-  }
-  
-  return(p)
-}
-

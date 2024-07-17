@@ -1,6 +1,6 @@
 
 
-```{r load packages and scripts}
+```{r}
 library(Seurat)
 library(dplyr)
 library(ggplot2)
@@ -16,8 +16,11 @@ source('clone_trajectory_util.R')
 ```
 
 ```{r load object}
-n1 <- readRDS("cd8_nn_labeled.RDS")
-m <- data.frame(n1@meta.data)
+n <- readRDS("cd8_nn_labeled_FINAL.RDS")
+n <- DietSeurat(n, assays="RNA")
+# subset RNA matrix to only Ki67 to speed up functions
+n <- subset(n, features = "MKI67")
+m <- data.frame(n@meta.data)
 m$timepoint <- gsub("Baseline", "0", m$timepoint)
 m$timepoint <- gsub("Follow Up 1", "3", m$timepoint)
 m$timepoint <- gsub("Follow Up 2", "6", m$timepoint)
@@ -25,103 +28,138 @@ m$timepoint <- gsub("Follow Up 3", "9", m$timepoint)
 m$timepoint <- gsub("Follow Up 4", "12", m$timepoint)
 m$timepoint <- gsub("Follow Up 5", "15", m$timepoint)
 m$timepoint <- gsub("Follow Up 6", "18", m$timepoint)
-n1@meta.data <- m
-n1 <- subset(n1, patient_alias != "14-1189_aCTLA-4") # unusual patient
-s.genes <- Seurat::cc.genes$s.genes
-g2m.genes <- Seurat::cc.genes$g2m.genes
-n1 <- CellCycleScoring(n1, s.features = s.genes, g2m.features = g2m.genes)
-n <- n1
+n@meta.data <- m
+# unusual patient and patient that missed dose and had prior immunotherapy
+n <- subset(n, patient_alias %in% c("14-1189_aCTLA-4", "17-2796"), invert=T)
 ```
 
 ```{r clean up object}
 timepoints <- c(0, 3, 6, 9)
-# timepoints <- c(0, 3, 6, 9, 12)
 n <- subset(n, timepoint %in% timepoints)
 n@meta.data$timepoint <- factor(n@meta.data$timepoint, levels=timepoints)
 
 a <- n@meta.data$TRA_chain_cdr3_nt
 b <- n@meta.data$TRB_chain_cdr3_nt
 
-a[is.na(a)] <- 0
-b[is.na(b)] <- 0
+# paste a and b only if both non na
+tcr <- unlist(lapply(1:length(a), function(i) {
+  if (is.na(a[i]) | is.na(b[i])) {return (NA)}
+  return (paste0(a[i], b[i]))
+}))
 
-temp3 <- function(x) {
-  if (grepl("0", x, fixed=TRUE)) {return (NA)}
-  return (x)
-}
-
-# only TRB
-tcr <- unlist(lapply(b, temp3))
 n <- AddMetaData(n, tcr, col.name="TCR_name")
 n <- subset(n, subset = TCR_name != "NA")
 tcr <- paste0(n@meta.data$TCR_name, n@meta.data$patient_alias)
 n <- AddMetaData(n, tcr, col.name="TCR_name")
-n <- subset(n, metaclusters_exh != "IFN")
 
 c <- data.frame(table(n@meta.data$patient_alias, n@meta.data$timepoint))
-# remove patients with less than 400 cells at any timepoint
-c <- c[c$Freq < 400 & c$Var2 %in% timepoints,]
-n <- subset(n, subset = patient_alias %in% c$Var1, invert=T)
+# remove patients with less than 300 counts at any timepoint
+c <- c[c$Freq < 380 & c$Var2 %in% timepoints,]
 
-# set celltype column
-n@meta.data$celltype <- n@meta.data$metaclusters_exh
+# get list of patients that are aPD1 treatment
+d <- table(n@meta.data$patient_alias, n@meta.data$treatment)
+d <- d[d[, "aPD-1 (naive)"] > 0,]
+d <- rownames(d)
+# remove from c that are in d
+c <- c[!(c$Var1 %in% d),]
+
+n <- subset(n, subset = patient_alias %in% c$Var1, invert=T)
 ```
 
-```{r single run for testing}
+```{r inspect patient, timepoints, and counts}
+table(n@meta.data$patient_alias, n@meta.data$timepoint, n@meta.data$treatment)
+```
+
+```{r}
+saveRDS(n, "cd8_nn_labeled_FORCYCLONE_FINAL.RDS")
+```
+
+```{r}
+n <- readRDS("cd8_nn_labeled_FORCYCLONE_FINAL.RDS")
+```
+
+```{r run Cyclone}
+# order specifies Traj # that belongs in position
+custom_order <- c(1, 4, 6, 2, 5, 3)
+#custom_order <- c(1, 2, 3, 4, 5, 6) # default order
+n@meta.data$treatment <- factor(n@meta.data$treatment, levels=c("aCTLA-4", "aPD1", "aPD-1 (naive)", "Combination"))
 nclust <- 6
 ncols <- ifelse(nclust > 4, 3, 2)
-# seurat object metadata needs columns: timepoint, treatment, patient_alias, celltype, TRB_chain_cdr3_nt
-n <- cyclone_find_trajectories(n, n_clust=nclust, min_fc=2, min_c=0.25, clustering_method="hclust", delta=T, custom_order=c(1, 4, 5, 6, 2, 3)) #hclust
+n <- cyclone_find_trajectories(n, n_clust=nclust, min_fc=2, min_c=0.25, clustering_method="hclust", delta=T, custom_order=custom_order)
+
 hm <- plot_trajectories_cor(n)
-save_heatmap_png(hm, 'trajectories_cor.png')
+save_pheatmap_png(hm, 'trajectories_cor.png')
+dev.off() # ensure that device is shut down
+
+# remove large outlier clone
+clonestats <- read.csv("fold change vs abs change_4_hclust.csv")
+clonestats <- clonestats[clonestats$perc > 0.25,]
+clonestats <- clonestats[clonestats$n_max >= 5,]
+maxperc <- mean(clonestats$perc) + 2.5*sd(clonestats$perc)
+
+# perc less than maxperc at all timepoints for each clone_id
+clones <- clonestats %>%
+  group_by(clone_id) %>%
+  filter(all(perc < maxperc)) %>%
+  pull(clone_id) %>%
+  unique()
+n@meta.data$k[!n@meta.data$clone_id %in% clones] <- "Other"
+n@misc$clonestats$k[!n@misc$clonestats$clone_id %in% clones] <- "Other"
+
+write.csv(n@misc$clonestats, "clonestats.csv")
+
+```
+
+```{r save object with Cyclone results}
+saveRDS(n, "cd8_nn_labeled_FORCYCLONE_FINAL_cyclone.RDS")
+```
+
+```{r plot figures}
 plot_trajectories_area(n, ncols=3) + theme(legend.position="none")
 ggsave('trajectories_area.png', width=6, height=6, dpi=500)
 ggsave('trajectories_area.pdf', width=6, height=6)
 plot_trajectories_area(n, col_by="patient_alias", ncols=ncols)
 ggsave('trajectories_area_patient.png', dpi=500)
+ggsave('trajectories_area_patient.pdf', dpi=500)
 plot_trajectories_area(n, col_by="patient_alias", split_treatment=T, normalize=F)
-ggsave('trajectories_area_patient_treatment.png', height=6, width=10, dpi=500)
-ggsave('trajectories_area_patient_treatment.pdf', height=6, width=10)
+ggsave('trajectories_area_patient_treatment.png', height=7, width=10, dpi=500)
+ggsave('trajectories_area_patient_treatment.pdf', height=7, width=10)
 plot_trajectories_area(n, col_by="k", split_treatment=T, normalize=F) + theme(legend.position="none")
-ggsave('trajectories_area_treatment_split.png', height=6, width=10, dpi=500)
-ggsave('trajectories_area_treatment_split.pdf', height=6, width=10)
-plot_trajectories_area(n, col_by="treatment", split_treatment=T, ncols=ncols) + theme(legend.position="none")
-ggsave('trajectories_area_split_treatment.png', dpi=500)
+ggsave('trajectories_area_treatment_split.png', height=7, width=10, dpi=500)
+ggsave('trajectories_area_treatment_split.pdf', height=7, width=10)
+plot_trajectories_area(n, col_by="patient_alias", split_response=T, normalize=F)
+ggsave('trajectories_area_response_split.png', height=6, width=10, dpi=500)
+ggsave('trajectories_area_response_split.pdf', height=6, width=10)
 plot_trajectories_area(n, group_by="patient_alias", ncols=ncols)
 ggsave('trajectories_area_patientgroup.png', dpi=500)
-plot_trajectories_area(n, col_by="treatment", ncols=ncols, ymax=250)
-ggsave('trajectories_area_treatment.png', dpi=500)
-
+ggsave('trajectories_area_patientgroup.pdf', dpi=500)
 
 plot_trajectories_ctype(n)
 ggsave('trajectories_ctype.png')
 plot_trajectories_ctype_treatment(n)
-ggsave('trajectories_ctype_treatment.png', width=15, dpi=500)
+ggsave('trajectories_ctype_treatment.png', width=15, height=10, dpi=500)
 plot_trajectories_ctype_treatment(n, delta="fc")
 ggsave('trajectories_ctype_treatment_fc.png', width=12, height=8, dpi=500)
-ggsave('trajectories_ctype_treatment_fc.pdf', width=12, height=8, dpi=500)
+ggsave('trajectories_ctype_treatment_fc.pdf', width=12, height=8)
+plot_trajectories_ctype_treatment(n, delta="fc", selected=c("Traj 3", "Traj 4", "Traj 5", "Traj 6"))
+ggsave('trajectories_ctype_treatment_fc_select.png', width=12, height=8, dpi=500)
 plot_trajectories_ctype_treatment(n, delta="abs")
-ggsave('trajectories_ctype_treatment_abs.png', width=15, dpi=500)
-ggsave('trajectories_ctype_treatment_abs.pdf', width=15)
-pd1_traj <- c("Traj 2", "Traj 3")
-ipi_traj <- c("Traj 1")
-combo_traj <- c("Traj 5", "Traj 6")
-plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=pd1_traj, treatments=c("aPD1"), ctypes=c("NK-like", "Effector", "Exhausted"))
-ggsave('trajectories_ctype_treatment_patient_abs_aPD1.png', width=6, height=6, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_abs_aPD1.pdf', width=6, height=6)
-plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=combo_traj, treatments=c("Combination"), ctypes=c("Effector", "Exhausted"))
-ggsave('trajectories_ctype_treatment_patient_abs_combo.png', width=7.5, height=6, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_abs_combo.pdf', width=7.5, height=6)
-plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=ipi_traj, treatments=c("aCTLA-4"), ctypes=c("Activated"))
-ggsave('trajectories_ctype_treatment_patient_abs_aCTLA-4.png', width=5, height=4, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_abs_aCTLA-4.pdf', width=5, height=4)
-plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=pd1_traj, treatments=c("aPD1"), ctypes=c("NK-like", "Effector", "Exhausted"))
-ggsave('trajectories_ctype_treatment_patient_fc_aPD1.png', width=6, height=6, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_fc_aPD1.pdf', width=6, height=6)
-plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=combo_traj, treatments=c("Combination"), ctypes=c("Effector", "Exhausted"))
-ggsave('trajectories_ctype_treatment_patient_fc_combo.png', width=7.5, height=6, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_fc_combo.pdf', width=7.5, height=6)
-plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=ipi_traj, treatments=c("aCTLA-4"), ctypes=c("Activated"))
-ggsave('trajectories_ctype_treatment_patient_fc_aCTLA-4.png', width=5, height=4, dpi=500)
-ggsave('trajectories_ctype_treatment_patient_fc_aCTLA-4.pdf', width=5, height=4)
+ggsave('trajectories_ctype_treatment_abs.png', width=15, height=10, dpi=500)
+ggsave('trajectories_ctype_treatment_abs.pdf', width=15, height=10)
+
+ctypes <- c("Early Activated", "Activated", "Early Effector", "Effector", "Exhausted", "NK-like")
+trajs <- c("Traj 1", "Traj 2", "Traj 3", "Traj 4", "Traj 5", "Traj 6")
+treatments <- unique(n@meta.data$treatment)
+for (treatment in treatments) {
+  plot_trajectories_ctype_treatment_patient(n, delta="abs", selected=trajs, treatments=c(treatment), ctypes=ctypes) + theme(strip.clip="off") +
+    scale_y_continuous(guide = guide_axis(check.overlap = TRUE))
+  ggsave(paste0("trajectories_ctype_treatment_patient_abs_", treatment, "_all.png"), width=10, height=10, dpi=500)
+  ggsave(paste0("trajectories_ctype_treatment_patient_abs_", treatment, "_all.pdf"), width=10, height=10)
+  plot_trajectories_ctype_treatment_patient(n, delta="fc", selected=trajs, treatments=c(treatment), ctypes=ctypes) + theme(strip.clip="off") +
+    scale_y_continuous(guide = guide_axis(check.overlap = TRUE))
+  ggsave(paste0("trajectories_ctype_treatment_patient_fc_", treatment, "_all.png"), width=10, height=10, dpi=500)
+  ggsave(paste0("trajectories_ctype_treatment_patient_fc_", treatment, "_all.pdf"), width=10, height=10)
+}
+
 ```
+
